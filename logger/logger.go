@@ -2,7 +2,6 @@ package logger
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -75,7 +74,6 @@ type Logger struct {
 	out     io.Writer    //输出到终端
 	level   int
 	service string
-	//File    *LogFile //输出到文件,fd永远指向当天文件
 }
 
 var loggerMap = map[string]*Logger{}
@@ -122,42 +120,6 @@ func SetDefaultLogger(service string) *Logger {
 	return nil
 }
 
-func itoa(buf *bytes.Buffer, i int, wid int) {
-	var u uint = uint(i)
-
-	if u == 0 && wid <= 1 {
-		buf.WriteByte('0')
-		return
-	}
-
-	var b [32]byte
-	bp := len(b)
-	for ; u > 0 || wid > 0; u /= 10 {
-		bp--
-		wid--
-		b[bp] = byte(u%10) + '0'
-	}
-
-	for bp < len(b) {
-		buf.WriteByte(b[bp])
-		bp++
-	}
-}
-
-func structsToMap(a interface{}) (map[string]interface{}, error) {
-	b, err := json.Marshal(a)
-
-	data := map[string]interface{}{}
-
-	err = json.Unmarshal(b, &data)
-	if err != nil {
-		return data, err
-	}
-
-	return data, nil
-
-}
-
 func InterfaceJoin(msg ...interface{}) string {
 	s := []string{}
 	for _, i := range msg {
@@ -195,8 +157,6 @@ func (l *Logger) writeLine(level string, depth int, msg ...interface{}) error {
 		_, err = l.out.Write(lineEntry)
 	}
 
-	//_, err = l.File.Write(lineEntry)
-
 	if err != nil {
 		log.Println("logger writeLine ERROR ", err)
 	}
@@ -204,53 +164,34 @@ func (l *Logger) writeLine(level string, depth int, msg ...interface{}) error {
 	return err
 }
 
-func Debug(msg ...interface{}) error {
+func Debug(format string, v ...interface{}) error {
 	if defaultLogger == nil {
-		log.Println(msg...)
+		log.Println(fmt.Sprintf(format, v...))
 		return errors.New(ErrorNotInit)
 	}
-	return defaultLogger.writeLine(LEVEL_DEBUG, 2, msg...)
-}
-
-func Debugf(format string, v ...interface{}) error {
-	if defaultLogger == nil {
-		log.Printf(format, v...)
-		return errors.New(ErrorNotInit)
-	}
-
 	return defaultLogger.writeLine(LEVEL_DEBUG, 2, fmt.Sprintf(format, v...))
 }
 
-func Info(msg ...interface{}) error {
+func Info(format string, v ...interface{}) error {
 	if defaultLogger == nil {
-		log.Println(msg...)
+		log.Println(fmt.Sprintf(format, v...))
 		return errors.New(ErrorNotInit)
 	}
-	return defaultLogger.writeLine(LEVEL_INFO, 2, msg...)
+	return defaultLogger.writeLine(LEVEL_INFO, 2, fmt.Sprintf(format, v...))
 }
 
-func Error(msg ...interface{}) error {
+func Error(format string, v ...interface{}) error {
 	if defaultLogger == nil {
-		log.Println(msg...)
+		log.Println(fmt.Sprintf(format, v...))
 		return errors.New(ErrorNotInit)
 	}
-	return defaultLogger.writeLine(LEVEL_ERROR, 2, msg...)
+	return defaultLogger.writeLine(LEVEL_ERROR, 2, fmt.Sprintf(format, v...))
 }
-func Warn(msg ...interface{}) error {
+
+func Warn(format string, v ...interface{}) error {
 	if defaultLogger == nil {
-		log.Println(msg...)
+		log.Println(fmt.Sprintf(format, v...))
 		return errors.New(ErrorNotInit)
 	}
-	return defaultLogger.writeLine(LEVEL_WARNNING, 2, msg...)
-}
-
-func (l *Logger) LogDebug(msg ...interface{}) error {
-	return l.writeLine(LEVEL_DEBUG, 2, msg...)
-}
-
-func (l *Logger) LogError(msg ...interface{}) error {
-	return l.writeLine(LEVEL_ERROR, 2, msg...)
-}
-func (l *Logger) LogWarnning(msg ...interface{}) error {
-	return l.writeLine(LEVEL_WARNNING, 2, msg...)
+	return defaultLogger.writeLine(LEVEL_WARNNING, 2, fmt.Sprintf(format, v...))
 }
