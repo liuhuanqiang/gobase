@@ -2,6 +2,7 @@ package logger
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -12,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/pkg/errors"
 )
 
@@ -41,17 +43,21 @@ const (
 
 //等级
 const (
-	LEVEL_INFO     = "INFO"  //消息在粗粒度级别上突出强调应用程序的运行过程
-	LEVEL_DEBUG    = "DEBUG" //细粒度信息事件对调试应用程序是非常有帮助的
-	LEVEL_WARNNING = "WARN"  //潜在错误的情形
-	LEVEL_ERROR    = "ERROR" //虽然发生错误事件，但仍然不影响系统的继续运行
+	LEVEL_INFO     = "INFO"     //消息在粗粒度级别上突出强调应用程序的运行过程
+	LEVEL_REQUEST  = "REQUEST"  //http请求的日志
+	LEVEL_DEBUG    = "DEBUG"    //细粒度信息事件对调试应用程序是非常有帮助的
+	LEVEL_WARNNING = "WARNNING" //潜在错误的情形
+	LEVEL_ERROR    = "ERROR"    //虽然发生错误事件，但仍然不影响系统的继续运行
+	LEVEL_BEHAVIOR = "BEHAVIOR" //行为日志
 )
 
 var levelMap = map[string]int{
-	LEVEL_INFO:     1,
-	LEVEL_DEBUG:    2,
-	LEVEL_WARNNING: 3,
-	LEVEL_ERROR:    4,
+	LEVEL_DEBUG:    1,
+	LEVEL_REQUEST:  2,
+	LEVEL_INFO:     3,
+	LEVEL_BEHAVIOR: 4,
+	LEVEL_WARNNING: 5,
+	LEVEL_ERROR:    6,
 }
 
 func GetLevel(label string) int {
@@ -74,6 +80,28 @@ type Logger struct {
 	out     io.Writer    //输出到终端
 	level   int
 	service string
+	//File    *LogFile //输出到文件,fd永远指向当天文件
+}
+
+type LogRequestStruct struct {
+	LogEntryStruct
+	TimeStr    string `json:"time_str"`
+	Path       string `json:"path"`
+	Host       string `json:"host"`
+	Method     string `json:"method"`
+	RemoteAddr string `json:"remote_addr"`
+	UserAgent  string `json:"user_agent"`
+	DeviceId   string `json:"device_id"`
+	Referrer   string `json:"referrer"`
+	Service    string `json:"service"`
+}
+
+type LogEntryStruct struct {
+	Topic   string `json:"topic"`
+	Time    int64  `json:"time"`
+	Service string `json:"service"`
+	UserID  int64  `json:"user_id"`
+	Msg     string `json:"msg"` //可以是错误信息 也可以 是 提示信息
 }
 
 var loggerMap = map[string]*Logger{}
@@ -120,6 +148,42 @@ func SetDefaultLogger(service string) *Logger {
 	return nil
 }
 
+func itoa(buf *bytes.Buffer, i int, wid int) {
+	var u uint = uint(i)
+
+	if u == 0 && wid <= 1 {
+		buf.WriteByte('0')
+		return
+	}
+
+	var b [32]byte
+	bp := len(b)
+	for ; u > 0 || wid > 0; u /= 10 {
+		bp--
+		wid--
+		b[bp] = byte(u%10) + '0'
+	}
+
+	for bp < len(b) {
+		buf.WriteByte(b[bp])
+		bp++
+	}
+}
+
+func structsToMap(a interface{}) (map[string]interface{}, error) {
+	b, err := json.Marshal(a)
+
+	data := map[string]interface{}{}
+
+	err = json.Unmarshal(b, &data)
+	if err != nil {
+		return data, err
+	}
+
+	return data, nil
+
+}
+
 func InterfaceJoin(msg ...interface{}) string {
 	s := []string{}
 	for _, i := range msg {
@@ -157,41 +221,193 @@ func (l *Logger) writeLine(level string, depth int, msg ...interface{}) error {
 		_, err = l.out.Write(lineEntry)
 	}
 
+	//_, err = l.File.Write(lineEntry)
+
 	if err != nil {
-		log.Println("logger writeLine ERROR ", err)
+		log.Println(" smmlogger writeLine ERROR ", err)
 	}
 
 	return err
 }
 
-func Debug(format string, v ...interface{}) error {
+func (l *Logger) smmLogEntry(topic string, entry interface{}) error {
+
+	logBytes, err := json.Marshal(entry)
+	if err != nil {
+		log.Println("ERROR", err)
+		return err
+	}
+	return l.writeLine(LEVEL_BEHAVIOR, 3, topic, string(logBytes))
+}
+
+func (l *Logger) smmLogRequest(topic string, entry interface{}) error {
+
+	logBytes, err := json.Marshal(entry)
+	if err != nil {
+		log.Println("ERROR", err)
+		return err
+	}
+	return l.writeLine(LEVEL_REQUEST, 3, topic, string(logBytes))
+}
+
+func (l *Logger) LogRequest(c *gin.Context, data map[string]interface{}) error {
+	TOPIC := "request"
+	req := LogRequestStruct{}
+	req.Host = c.Request.Host
+	req.Method = c.Request.Method
+	req.Path = c.Request.URL.Path
+	req.RemoteAddr = c.ClientIP()
+	req.TimeStr = time.Now().Format("2006-01-02 15:04:05.999999999")
+	req.UserAgent = c.Request.UserAgent()
+	req.Referrer = c.Request.Referer()
+	req.Service = l.service
+
+	req.Time = time.Now().UnixNano() / 1e6
+	req.Topic = TOPIC
+
+	token := ""
+	XHEADER := c.Request.Header.Get("SMM-TOKEN")
+	if len(XHEADER) > 0 {
+		token = XHEADER
+	}
+	XHEADER = c.Request.Header.Get("X-API-KEY")
+	if len(token) == 0 && len(XHEADER) > 0 {
+		token = XHEADER
+	} else {
+		if len(token) == 0 {
+			if cookie, err := c.Request.Cookie("SMM_auth_token"); err == nil {
+				token = cookie.Value
+			}
+		}
+	}
+
+	m, _ := structsToMap(req)
+	var body string
+	if c.Request.Method == "POST" {
+		body = c.Request.PostForm.Encode()
+
+	}
+	if c.Request.Method == "GET" {
+		body = c.Request.URL.Query().Encode()
+	}
+	if len(body) > 10*1024 {
+		m["body"] = body[:10*1024]
+	} else {
+		m["body"] = body
+	}
+
+	m["token"] = token
+
+	m["smm_device"] = c.Request.Header.Get("smm_device")
+	m["smm_version"] = c.Request.Header.Get("smm_version")
+	if len(m["smm_device"].(string)) == 0 {
+		m["smm_device"] = c.Request.Header.Get("smm-device")
+		m["smm_version"] = c.Request.Header.Get("smm-version")
+	}
+
+	m["smm_device_info"] = c.Request.Header.Get("smm-device-info")
+
+	for k, v := range data { //user_id response_time
+		_, ok := m[k]
+		if ok == true { //跳过关键字
+			continue
+		} else {
+			m[k] = v
+		}
+	}
+
+	return l.smmLogRequest(TOPIC, m)
+
+}
+
+func Debug(msg ...interface{}) error {
 	if defaultLogger == nil {
-		log.Println(fmt.Sprintf(format, v...))
+		log.Println(msg...)
 		return errors.New(ErrorNotInit)
 	}
+	return defaultLogger.writeLine(LEVEL_DEBUG, 2, msg...)
+}
+
+func Debugf(format string, v ...interface{}) error {
+	if defaultLogger == nil {
+		log.Printf(format, v...)
+		return errors.New(ErrorNotInit)
+	}
+
 	return defaultLogger.writeLine(LEVEL_DEBUG, 2, fmt.Sprintf(format, v...))
 }
 
-func Info(format string, v ...interface{}) error {
+func Info(msg ...interface{}) error {
 	if defaultLogger == nil {
-		log.Println(fmt.Sprintf(format, v...))
+		log.Println(msg...)
 		return errors.New(ErrorNotInit)
 	}
-	return defaultLogger.writeLine(LEVEL_INFO, 2, fmt.Sprintf(format, v...))
+	return defaultLogger.writeLine(LEVEL_INFO, 2, msg...)
 }
 
-func Error(format string, v ...interface{}) error {
+func Behavior(topic string, userID int64, data map[string]interface{}) error {
 	if defaultLogger == nil {
-		log.Println(fmt.Sprintf(format, v...))
+		log.Println(topic, data)
 		return errors.New(ErrorNotInit)
 	}
-	return defaultLogger.writeLine(LEVEL_ERROR, 2, fmt.Sprintf(format, v...))
+	entry := LogEntryStruct{}
+	entry.Time = time.Now().UnixNano() / 1e6
+	entry.Topic = topic
+	entry.UserID = userID
+
+	entry.Service = defaultLogger.service
+	m, _ := structsToMap(entry)
+
+	for k, v := range data {
+		_, ok := m[k]
+		if ok == true { //跳过关键字
+			continue
+		} else {
+			m[k] = v
+		}
+	}
+	return defaultLogger.smmLogEntry(topic, m)
 }
 
-func Warn(format string, v ...interface{}) error {
+func Error(msg ...interface{}) error {
 	if defaultLogger == nil {
-		log.Println(fmt.Sprintf(format, v...))
+		log.Println(msg...)
 		return errors.New(ErrorNotInit)
 	}
-	return defaultLogger.writeLine(LEVEL_WARNNING, 2, fmt.Sprintf(format, v...))
+	return defaultLogger.writeLine(LEVEL_ERROR, 2, msg...)
+}
+func Warnning(msg ...interface{}) error {
+	if defaultLogger == nil {
+		log.Println(msg...)
+		return errors.New(ErrorNotInit)
+	}
+	return defaultLogger.writeLine(LEVEL_WARNNING, 2, msg...)
+}
+
+func (l *Logger) LogDebug(msg ...interface{}) error {
+	return l.writeLine(LEVEL_DEBUG, 2, msg...)
+}
+func (l *Logger) LogInfo(topic string, data map[string]interface{}) error {
+	entry := LogEntryStruct{}
+	entry.Time = time.Now().UnixNano() / 1e6
+	entry.Topic = topic
+
+	entry.Service = l.service
+	m, _ := structsToMap(entry)
+
+	for k, v := range data {
+		_, ok := m[k]
+		if ok == true { //跳过关键字
+			continue
+		} else {
+			m[k] = v
+		}
+	}
+	return l.smmLogEntry(topic, m)
+}
+func (l *Logger) LogError(msg ...interface{}) error {
+	return l.writeLine(LEVEL_ERROR, 2, msg...)
+}
+func (l *Logger) LogWarnning(msg ...interface{}) error {
+	return l.writeLine(LEVEL_WARNNING, 2, msg...)
 }
